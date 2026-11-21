@@ -1,0 +1,43 @@
+name: sign
+
+# Signs the relay weights block of each network on a merge to main that changes what is
+# signed or how, and every week with the same weights (a block is valid for 30 days).
+# Never on pull requests, manual dispatch or other workflows: the signing role accepts only
+# this file on main.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "relay-weights/**"
+      - "keys/**"
+      - "scripts/**"
+      - ".github/workflows/sign.yml"
+  schedule:
+    - cron: "23 7 * * 1"
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: sign
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Sign and publish
+        env:
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          CONFIG_BUCKET: ${{ secrets.CONFIG_BUCKET }}
+          TESTNET_ROLE_ARN: ${{ secrets.TESTNET_ROLE_ARN }}
+          TESTNET_KMS_KEY_ID: ${{ secrets.TESTNET_KMS_KEY_ID }}
+          TESTNET_RELAYS_SECRET: ${{ secrets.TESTNET_RELAYS_SECRET }}
+        run: python3 -I scripts/sign.py
