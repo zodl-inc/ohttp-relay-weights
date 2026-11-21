@@ -143,12 +143,44 @@ class Verify(unittest.TestCase):
 
 
 class CrossPlatformVector(unittest.TestCase):
-    """The client library's published vector: message, set, block id and signature must match
-    exactly. Placeholder until the vector is published."""
+    """The client library's published vector (relay-weights-test-vector.json, copied as is):
+    set, message, block JSON and block id must match byte for byte."""
 
-    @unittest.skip("cross-platform vector not published yet")
-    def test_vector(self):
-        pass
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "relay-weights-test-vector.json")) as f:
+            cls.v = json.load(f)
+
+    def test_canonical(self):
+        v = self.v
+        self.assertEqual(sign.check_relays({"relays": v["relay_urls_canonical"]}), v["relay_urls_canonical"])
+        self.assertEqual([sign.canonical_dns_url(u) for u in v["relay_urls_as_written"]], v["relay_urls_canonical"])
+        with self.assertRaises(sign.Refused):
+            sign.check_relays({"relays": [v["relay_urls_as_written"][0]]})
+
+    def test_set_message_block(self):
+        v = self.v
+        set_bytes = sign.relay_set(v["relay_urls_canonical"])
+        self.assertEqual(set_bytes.hex(), v["set"])
+        self.assertEqual(sign.validity(v["seq"]), (v["not_before"], v["not_after"]))
+        msg = sign.message(v["network"], v["seq"], v["not_before"], v["not_after"], set_bytes, v["weights"])
+        self.assertEqual(msg.hex(), v["signed_message_hex"])
+        self.assertEqual(sign.block_id(msg), v["block_id"])
+        pub = bytes.fromhex(v["public_key_hex"])
+        self.assertEqual(sign.key_id(pub), v["key_id"])
+        sig = base64.b64decode(v["signature_base64"])
+        body = sign.block_json(v["network"], v["seq"], v["not_before"], v["not_after"], set_bytes, v["weights"],
+                               sign.key_id(pub), sig)
+        self.assertEqual(body, v["block_json"])
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl not installed")
+    def test_signature(self):
+        v = self.v
+        msg = bytes.fromhex(v["signed_message_hex"])
+        pub = bytes.fromhex(v["public_key_hex"])
+        sig = base64.b64decode(v["signature_base64"])
+        self.assertTrue(sign.verify(pub, msg, sig))
+        self.assertFalse(sign.verify(pub, msg[:-1] + b"\x1f", sig))
 
 
 class Main(unittest.TestCase):
