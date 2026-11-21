@@ -18,6 +18,7 @@ values that must exist in memory are masked in the Actions log.
 """
 
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -45,6 +46,27 @@ class Refused(Exception):
     """A check failed: nothing is signed or published for this run."""
 
 
+HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)*")
+CLOCK_SKEW = 60
+
+
+def _no_duplicates(pairs):
+    keys = [k for k, _ in pairs]
+    if len(keys) != len(set(keys)):
+        raise Refused("duplicate JSON key")
+    return dict(pairs)
+
+
+def loads_strict(text, what):
+    """json.loads that refuses duplicate keys and maps every parse error to Refused."""
+    try:
+        return json.loads(text, object_pairs_hook=_no_duplicates)
+    except Refused:
+        raise Refused(f"{what} has a duplicate JSON key") from None
+    except (ValueError, TypeError, RecursionError):
+        raise Refused(f"{what} is not valid JSON") from None
+
+
 # ---------------------------------------------------------------- pure functions (tested)
 
 def validate_weights(doc):
@@ -67,15 +89,20 @@ def canonical_dns_url(url):
     default port, no query/fragment/userinfo, one trailing slash removed."""
     if not isinstance(url, str) or not url or any(c.isspace() for c in url) or not url.isascii():
         raise Refused("relay list entry is not a URL")
-    p = urllib.parse.urlsplit(url)
+    if "\\" in url or "//" in url[len("https://"):] or not url.isprintable():
+        raise Refused("relay list entry has a backslash, an empty segment or a control character")
+    try:
+        p = urllib.parse.urlsplit(url)
+        port = p.port
+    except ValueError:
+        raise Refused("relay list entry has an invalid port or host") from None
     if p.scheme.lower() != "https":
         raise Refused("relay list entry is not https")
     if p.query or p.fragment or "?" in url or "#" in url or "@" in p.netloc:
         raise Refused("relay list entry has a query, fragment or userinfo")
     host = (p.hostname or "").lower()
-    if not host or host.startswith("[") or ":" in host:
+    if not HOST.fullmatch(host):
         raise Refused("relay list entry has no DNS host")
-    port = p.port
     netloc = host if port in (None, 443) else f"{host}:{port}"
     path = p.path
     segs = path.split("/")
@@ -147,19 +174,38 @@ def read_pub(path):
     return bytes.fromhex(text)
 
 
-def last_seq(log_path, network):
+def last_seq(log_path, network, now):
+    """Highest logged seq of the network. A malformed line, or a seq more than 60 s ahead of
+    now, stops signing: the log must be repaired first."""
     best = 0
     if not os.path.exists(log_path):
         return best
     with open(log_path, encoding="utf-8") as f:
-        for line in f:
+        for i, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
-            entry = json.loads(line)
-            if entry.get("network") == network:
-                best = max(best, int(entry["seq"]))
+            entry = loads_strict(line, f"log line {i}")
+            if not isinstance(entry, dict) or not isinstance(entry.get("network"), str):
+                raise Refused(f"log line {i} is malformed")
+            seq = entry.get("seq")
+            if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+                raise Refused(f"log line {i} has no integer seq")
+            if entry["network"] != network:
+                continue
+            if seq > now + CLOCK_SKEW:
+                raise Refused(f"log line {i} has a seq in the future")
+            best = max(best, seq)
     return best
+
+
+def check_head(commit, run_attempt, remote_head):
+    """Sign only the current head of main, and only on a run's first attempt: a re-run of an
+    old run would otherwise re-publish old weights with a fresh seq."""
+    if run_attempt != "1":
+        raise Refused("not the first attempt of this run (re-runs never sign)")
+    if commit != remote_head:
+        raise Refused("this run's commit is not the current head of main")
 
 
 def verify(raw_pub, msg, sig):
@@ -269,12 +315,14 @@ class Cloud:
                                       self.relays_secret, "--query", "SecretString", "--output", "text"],
                   env=self.env)
         try:
-            doc = json.loads(out)
-        except ValueError:
-            raise Refused("relay list is not JSON") from None
-        for u in doc.get("relays", []) if isinstance(doc, dict) else []:
+            text = out.decode("ascii")
+        except UnicodeDecodeError:
+            raise Refused("relay list is not ASCII") from None
+        relays = check_relays(loads_strict(text, "relay list"))
+        # Only validated single-line values reach the mask command.
+        for u in relays:
             mask(u)
-        return check_relays(doc)
+        return relays
 
     def sign(self, msg):
         with tempfile.NamedTemporaryFile("wb", delete=False) as f:
@@ -286,7 +334,10 @@ class Cloud:
                                "--query", "Signature", "--output", "text"], env=self.env)
         finally:
             os.unlink(path)
-        return base64.b64decode(out.strip())
+        try:
+            return base64.b64decode(out.strip(), validate=True)
+        except (binascii.Error, ValueError):
+            raise Refused("signature is not base64") from None
 
     def publish(self, network, body, trigger, bid, seq):
         with tempfile.NamedTemporaryFile("wb", delete=False) as f:
@@ -331,16 +382,19 @@ def sign_network(network, repo_root, trigger, commit, state):
     pub_path = os.path.join(repo_root, "keys", f"{network}.pub")
     if not os.path.exists(weights_path):
         return
-    try:
-        doc = json.load(open(weights_path, encoding="utf-8"))
-    except ValueError:
-        raise Refused("weights file is not JSON") from None
+    with open(weights_path, encoding="utf-8") as f:
+        doc = loads_strict(f.read(), "weights file")
     weights = validate_weights(doc)
     if not os.path.exists(pub_path):
         print(f"{network}: no public key (keys/{network}.pub), skipped")
         return
     raw_pub = read_pub(pub_path)
     kid = key_id(raw_pub)
+    if "head_checked" not in state:
+        out = run("git ls-remote", ["git", "-C", repo_root, "ls-remote", "origin", "refs/heads/main"])
+        remote_head = out.decode("ascii", "replace").split("\t", 1)[0].strip()
+        check_head(commit, os.environ.get("GITHUB_RUN_ATTEMPT", ""), remote_head)
+        state["head_checked"] = True
 
     cloud = Cloud(network)
     relays = cloud.relays()
@@ -352,7 +406,7 @@ def sign_network(network, repo_root, trigger, commit, state):
         state["log_dir"] = open_log(repo_root)
     log_dir = state["log_dir"]
     seq = int(time.time())
-    if seq <= last_seq(os.path.join(log_dir, LOG_FILE), network):
+    if seq <= last_seq(os.path.join(log_dir, LOG_FILE), network, seq):
         raise Refused(f"seq {seq} is not above the last logged seq")
     not_before, not_after = validity(seq)
     msg = message(network, seq, not_before, not_after, set_bytes, weights)
@@ -390,8 +444,15 @@ def main():
         except Refused as e:
             print(f"{network}: refused: {e}")
             failed = True
+        except Exception as e:  # noqa: BLE001 - never print details (they may name resources)
+            print(f"{network}: failed ({type(e).__name__})")
+            failed = True
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:  # noqa: BLE001 - never print details
+        print(f"failed ({type(e).__name__})")
+        sys.exit(1)
