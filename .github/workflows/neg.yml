@@ -1,0 +1,27 @@
+name: neg
+on:
+  push:
+    branches: [neg-test]
+  pull_request:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  try:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Try to assume the signing role
+        env:
+          ROLE: ${{ secrets.TESTNET_ROLE_ARN }}
+        run: |
+          set +e
+          [ -n "$ROLE" ] || { echo "no role secret available"; exit 0; }
+          tok=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "::add-mask::$tok"
+          echo "$tok" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -r '"sub=" + .sub' | sed 's/@[0-9]*\//@ORG\//'
+          printf '%s' "$tok" > /tmp/t
+          if aws sts assume-role-with-web-identity --role-arn "$ROLE" --role-session-name neg --web-identity-token file:///tmp/t >/dev/null 2>/tmp/err; then
+            echo "RESULT: ACCEPTED"
+          else
+            grep -q AccessDenied /tmp/err && echo "RESULT: refused (AccessDenied)" || echo "RESULT: other error"
+          fi
