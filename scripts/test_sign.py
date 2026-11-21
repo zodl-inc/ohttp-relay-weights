@@ -61,8 +61,12 @@ class Relays(unittest.TestCase):
             "https://user@relay.example/relay", "http://relay.example/relay", "https://relay.example/a/../b",
             "https://relay.example/./b", " https://relay.example/relay", "https://relay.example/re lay",
             "https://relay.example/%zz", "https://[::1]/relay", "https://192.0.2.1:99999/x", "", 7,
+            "https://relay.example:abc/x", "https://relay.example\\@evil.example/x", "https://relay.example//x",
+            "https://relay.example/a//b", "https://relay.example/x\n", "https://relay.example/x\x7f",
+            "https://relay_a.example/x", "https://relay.example./x", "https://.relay.example/x",
+            "https://relay..example/x", "https://rel%61y.example/x",
         ]:
-            with self.subTest(u=u), self.assertRaises((sign.Refused, ValueError)):
+            with self.subTest(u=u), self.assertRaises(sign.Refused):
                 sign.check_relays({"relays": [u]})
 
     def test_shape(self):
@@ -106,14 +110,62 @@ class Message(unittest.TestCase):
 
 
 class Log(unittest.TestCase):
+    def write(self, d, text):
+        p = os.path.join(d, "log.jsonl")
+        with open(p, "w") as f:
+            f.write(text)
+        return p
+
     def test_last_seq(self):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "log.jsonl")
-            self.assertEqual(sign.last_seq(p, "testnet"), 0)
-            with open(p, "w") as f:
-                f.write('{"network":"testnet","seq":5}\n{"network":"mainnet","seq":9}\n\n{"network":"testnet","seq":7}\n')
-            self.assertEqual(sign.last_seq(p, "testnet"), 7)
-            self.assertEqual(sign.last_seq(p, "mainnet"), 9)
+            self.assertEqual(sign.last_seq(p, "testnet", 100), 0)
+            self.write(d, '{"network":"testnet","seq":5}\n{"network":"mainnet","seq":9}\n\n{"network":"testnet","seq":7}\n')
+            self.assertEqual(sign.last_seq(p, "testnet", 100), 7)
+            self.assertEqual(sign.last_seq(p, "mainnet", 100), 9)
+
+    def test_malformed_refused(self):
+        for text in ['{"network":"testnet","seq":5\n', '[1]\n', '{"network":"testnet"}\n',
+                     '{"network":"testnet","seq":"5"}\n', '{"network":"testnet","seq":true}\n',
+                     '{"network":"testnet","seq":5,"seq":6}\n', '{"seq":5}\n']:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as d:
+                p = self.write(d, text)
+                with self.assertRaises(sign.Refused):
+                    sign.last_seq(p, "testnet", 100)
+
+    def test_future_seq_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.write(d, '{"network":"testnet","seq":161}\n')
+            with self.assertRaises(sign.Refused):
+                sign.last_seq(p, "testnet", 100)
+            self.assertEqual(sign.last_seq(p, "mainnet", 100), 0)
+            p = self.write(d, '{"network":"testnet","seq":160}\n')
+            self.assertEqual(sign.last_seq(p, "testnet", 100), 160)
+
+
+class Head(unittest.TestCase):
+    def test_check_head(self):
+        sha = "a" * 40
+        sign.check_head(sha, "1", sha)
+        for attempt, head in [("2", sha), ("", sha), ("1", "b" * 40), ("1", "")]:
+            with self.subTest(attempt=attempt, head=head), self.assertRaises(sign.Refused):
+                sign.check_head(sha, attempt, head)
+
+
+class StrictJson(unittest.TestCase):
+    def test_duplicate_keys(self):
+        with self.assertRaises(sign.Refused):
+            sign.loads_strict('{"weights":[100],"weights":[50,50]}', "weights file")
+        with self.assertRaises(sign.Refused):
+            sign.loads_strict('{"relays":["https://a.example"],"relays":[]}', "relay list")
+
+    def test_not_json(self):
+        for text in ["", "{", "[1,]", "NaN-", "\ud800"]:
+            with self.subTest(text=text), self.assertRaises(sign.Refused):
+                sign.loads_strict(text, "x")
+
+    def test_ok(self):
+        self.assertEqual(sign.loads_strict('{"weights":[50,50]}', "x"), {"weights": [50, 50]})
 
 
 @unittest.skipUnless(shutil.which("openssl"), "openssl not installed")
@@ -190,6 +242,37 @@ class Main(unittest.TestCase):
                            env=env, capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
         self.assertIn("refusing", r.stdout)
+
+    def run_in_tree(self, weights_text, with_key, attempt="1"):
+        root = tempfile.mkdtemp()
+        try:
+            os.makedirs(os.path.join(root, "scripts"))
+            os.makedirs(os.path.join(root, "relay-weights"))
+            shutil.copy(sign.__file__, os.path.join(root, "scripts", "sign.py"))
+            with open(os.path.join(root, "relay-weights", "testnet.json"), "w") as f:
+                f.write(weights_text)
+            if with_key:
+                os.makedirs(os.path.join(root, "keys"))
+                with open(os.path.join(root, "keys", "testnet.pub"), "w") as f:
+                    f.write("ab" * 32 + "\n")
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "ACTIONS_", "GIT_"))}
+            env.update(GITHUB_EVENT_NAME="push", GITHUB_SHA="a" * 40, GITHUB_RUN_ATTEMPT=attempt)
+            return subprocess.run([sys.executable, "-I", os.path.join(root, "scripts", "sign.py")],
+                                  env=env, capture_output=True, text=True, cwd=root)
+        finally:
+            shutil.rmtree(root)
+
+    def test_duplicate_weights_key_refused(self):
+        r = self.run_in_tree('{"weights":[100],"weights":[50,50]}', with_key=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("duplicate JSON key", r.stdout)
+
+    def test_not_head_of_main_refused(self):
+        # No git repository with an origin here: ls-remote fails, nothing is signed.
+        r = self.run_in_tree('{"weights":[50,50]}', with_key=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("testnet: refused: git ls-remote failed", r.stdout)
+        self.assertEqual(r.stderr, "")
 
     def test_skips_without_key(self):
         root = tempfile.mkdtemp()
