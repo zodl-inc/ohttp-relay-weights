@@ -40,4 +40,7 @@ jobs:
           TESTNET_ROLE_ARN: ${{ secrets.TESTNET_ROLE_ARN }}
           TESTNET_KMS_KEY_ID: ${{ secrets.TESTNET_KMS_KEY_ID }}
           TESTNET_RELAYS_SECRET: ${{ secrets.TESTNET_RELAYS_SECRET }}
+          MAINNET_ROLE_ARN: ${{ secrets.MAINNET_ROLE_ARN }}
+          MAINNET_KMS_KEY_ID: ${{ secrets.MAINNET_KMS_KEY_ID }}
+          MAINNET_RELAYS_SECRET: ${{ secrets.MAINNET_RELAYS_SECRET }}
         run: python3 -I scripts/sign.py
