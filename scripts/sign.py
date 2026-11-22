@@ -46,7 +46,12 @@ class Refused(Exception):
     """A check failed: nothing is signed or published for this run."""
 
 
-HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)*")
+# A DNS host name: at most 253 characters of labels of 1 to 63 letters, digits and '-', not
+# starting or ending with '-'. The last label must not read as a number to the URL standard
+# (all digits, or 0x and hex digits), so that no IPv4 literal or numeric alias passes: relay
+# lists name DNS hosts only.
+LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+HOST = re.compile(rf"(?=.{{1,253}}\Z)(?:{LABEL}\.)*(?!(?:[0-9]+|0x[0-9a-f]*)\Z){LABEL}")
 CLOCK_SKEW = 60
 
 
@@ -96,6 +101,9 @@ def canonical_dns_url(url):
         port = p.port
     except ValueError:
         raise Refused("relay list entry has an invalid port or host") from None
+    # An empty port (`host:`) or port 0 is refused by clients.
+    if p.netloc.endswith(":") or port == 0:
+        raise Refused("relay list entry has an invalid port or host")
     if p.scheme.lower() != "https":
         raise Refused("relay list entry is not https")
     if p.query or p.fragment or "?" in url or "#" in url or "@" in p.netloc:
@@ -110,6 +118,13 @@ def canonical_dns_url(url):
         raise Refused("relay list entry has dot segments")
     if re.search(r"%(?![0-9A-F]{2})", path):
         raise Refused("relay list entry has non-normalized percent-encoding")
+    if re.search(r"%(2f|5c)", path, re.IGNORECASE):
+        raise Refused("relay list entry has an encoded '/' or '\\'")
+    # An escaped unreserved character is decoded by clients (`%7E` is `~`): not canonical.
+    for m in re.finditer(r"%([0-9A-F]{2})", path):
+        c = chr(int(m.group(1), 16))
+        if c.isascii() and (c.isalnum() or c in "-._~"):
+            raise Refused("relay list entry has an escaped unreserved character")
     if path.endswith("/"):
         path = path[:-1]
     return f"https://{netloc}{path}"

@@ -6,6 +6,7 @@
 
 import base64
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -290,6 +291,42 @@ class Main(unittest.TestCase):
             self.assertIn("testnet: no public key", r.stdout)
         finally:
             shutil.rmtree(root)
+
+
+class HostRuleTest(unittest.TestCase):
+    def test_only_dns_hosts(self):
+        for good in ["relay.example", "a-b.example", "x1.example", "relay"]:
+            self.assertTrue(sign.HOST.fullmatch(good), good)
+        for bad in ["192.0.2.1", "-relay.example", "relay-.example", "relay..example", "a" * 64 + ".example",
+                    "relay.123", "0xc0000201", "1.0x2", "192.0.2.0x1", "0x", ("a" * 63 + ".") * 4 + "com"]:
+            self.assertFalse(sign.HOST.fullmatch(bad), bad)
+
+
+class UrlVectorTest(unittest.TestCase):
+    """The DNS-host cases of the client library's published URL vectors: what sign.py accepts
+    as canonical must be what clients compute."""
+
+    def test_dns_cases_agree_with_the_client(self):
+        path = os.path.join(os.path.dirname(__file__), "relay-url-vectors.json")
+        with open(path) as f:
+            v = json.load(f)
+        for case in v["canonical"]:
+            host = case["canonical"].split("/")[2].split(":")[0]
+            if host.startswith("[") or re.fullmatch(r"[0-9.]+", host):
+                continue
+            self.assertEqual(sign.canonical_dns_url(case["canonical"]), case["canonical"], case["note"])
+            if case["input"] != case["canonical"]:
+                try:
+                    out = sign.canonical_dns_url(case["input"])
+                except sign.Refused:
+                    continue
+                self.assertEqual(out, case["canonical"], case["note"])
+        for case in v["refused"]:
+            with self.assertRaises(sign.Refused, msg=case["note"]):
+                sign.canonical_dns_url(case["input"])
+        for lst in v["lists"]:
+            if all(not re.search(r"//(\[|[0-9.]+[/:])", u) for u in lst["canonical"]):
+                self.assertEqual(sign.relay_set(lst["canonical"]).hex(), lst["set"], lst["note"])
 
 
 if __name__ == "__main__":

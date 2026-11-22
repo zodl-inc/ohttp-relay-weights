@@ -64,7 +64,8 @@ published:
 The log is a superset of the published blocks: a line is pushed before its block is uploaded,
 so a logged block may have failed to upload, but no block is published without a log line. The
 job signs only the current head of `main` and only on the first attempt of a run; a re-run of
-an old run is refused.
+an old run is refused. So a run that failed after its log line (an upload error, say) is not
+retried: the next merge touching the signed paths, or the weekly run, signs again.
 
 ## Format
 
