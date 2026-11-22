@@ -18,5 +18,16 @@ jobs:
         with:
           persist-credentials: false
 
+      # scripts/relay-url-vectors.json must be the client library's published copy, at the
+      # commit pinned in scripts/relay-url-vectors.source (bump both together).
+      - name: URL vectors match the client library's
+        run: |
+          set -euo pipefail
+          commit=$(tr -d '[:space:]' < scripts/relay-url-vectors.source)
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "relay-url-vectors.source: not a commit id"; exit 1; }
+          curl -fsS --proto '=https' --max-time 30 -o "$RUNNER_TEMP/vectors.json" \
+            "https://raw.githubusercontent.com/zodl-inc/zodl-ohttp/$commit/docs/relay-url-vectors.json"
+          cmp "$RUNNER_TEMP/vectors.json" scripts/relay-url-vectors.json
+
       - name: Unit tests
         run: python3 -B -m unittest discover -s scripts -p 'test_*.py' -v
