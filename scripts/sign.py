@@ -118,6 +118,8 @@ def canonical_dns_url(url):
         raise Refused("relay list entry has dot segments")
     if re.search(r"%(?![0-9A-F]{2})", path):
         raise Refused("relay list entry has non-normalized percent-encoding")
+    if re.search(r"%(2f|5c)", path, re.IGNORECASE):
+        raise Refused("relay list entry has an encoded '/' or '\\'")
     # An escaped unreserved character is decoded by clients (`%7E` is `~`): not canonical.
     for m in re.finditer(r"%([0-9A-F]{2})", path):
         c = chr(int(m.group(1), 16))

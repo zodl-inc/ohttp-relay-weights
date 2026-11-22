@@ -105,6 +105,11 @@
       "input": "https://[::ffff:192.0.2.1]/relay",
       "canonical": "https://[::ffff:c000:201]/relay",
       "note": "IPv4-mapped IPv6 as the URL standard writes it"
+    },
+    {
+      "input": "https://relay.example:00443/relay",
+      "canonical": "https://relay.example/relay",
+      "note": "default port with leading zeros dropped"
     }
   ],
   "refused": [
@@ -127,6 +132,14 @@
     {
       "input": "https://relay.example/a%2fb",
       "note": "encoded slash"
+    },
+    {
+      "input": "https://relay.example/a%2Fb",
+      "note": "encoded slash, upper-case hex"
+    },
+    {
+      "input": "https://relay.example/a%5Cb",
+      "note": "encoded backslash"
     },
     {
       "input": "https://relay.example/a%zz",
