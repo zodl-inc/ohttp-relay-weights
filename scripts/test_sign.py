@@ -292,5 +292,13 @@ class Main(unittest.TestCase):
             shutil.rmtree(root)
 
 
+
+class HostRuleTest(unittest.TestCase):
+    def test_only_dns_hosts(self):
+        for good in ["relay.example", "a-b.example", "x1.example", "relay"]:
+            self.assertTrue(sign.HOST.fullmatch(good), good)
+        for bad in ["192.0.2.1", "-relay.example", "relay-.example", "relay..example", "a" * 64 + ".example", "relay.123"]:
+            self.assertFalse(sign.HOST.fullmatch(bad), bad)
+
 if __name__ == "__main__":
     unittest.main()

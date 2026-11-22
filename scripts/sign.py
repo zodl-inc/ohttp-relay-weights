@@ -46,7 +46,10 @@ class Refused(Exception):
     """A check failed: nothing is signed or published for this run."""
 
 
-HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)*")
+# A DNS host name: labels of 1 to 63 letters, digits and '-', not starting or ending with '-',
+# the last one not all digits (so no IPv4 literal: relay lists name DNS hosts only).
+LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+HOST = re.compile(rf"(?:{LABEL}\.)*(?=[a-z0-9-]*[a-z-])" + LABEL)
 CLOCK_SKEW = 60
 
 
